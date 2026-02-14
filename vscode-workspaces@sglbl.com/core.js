@@ -49,8 +49,13 @@ export class VSCodeWorkspacesCore {
             binary: 'cursor',
             workspacePath: GLib.build_filenamev([this._userConfigDir, 'Cursor/User/workspaceStorage']),
         },
+        {
+            name: 'antigravity',
+            binary: 'antigravity',
+            workspacePath: GLib.build_filenamev([this._userConfigDir, 'Antigravity/User/workspaceStorage']),
+        },
     ];
-    _iconNames = ['code', 'vscode', 'vscodium', 'codium', 'code-insiders', 'cursor'];
+    _iconNames = ['code', 'vscode', 'vscodium', 'codium', 'code-insiders', 'cursor', 'antigravity'];
     _menuUpdating = false;
     _cleanupOrphanedWorkspaces = false;
     _nofailList = [];
@@ -228,7 +233,7 @@ export class VSCodeWorkspacesCore {
                 const customName = GLib.path_get_basename(editorLocation);
                 const lowerCustomName = customName.toLowerCase();
                 let customWorkspacePath = '';
-                if (lowerCustomName.includes('code') || lowerCustomName.includes('codium')) {
+                if (lowerCustomName.includes('code') || lowerCustomName.includes('codium') || lowerCustomName.includes('antigravity')) {
                     if (lowerCustomName.includes('insiders')) {
                         customWorkspacePath = GLib.build_filenamev([this._userConfigDir, 'Code - Insiders/User/workspaceStorage']);
                     }
@@ -237,6 +242,9 @@ export class VSCodeWorkspacesCore {
                     }
                     else if (lowerCustomName.includes('cursor')) {
                         customWorkspacePath = GLib.build_filenamev([this._userConfigDir, 'Cursor/User/workspaceStorage']);
+                    }
+                    else if (lowerCustomName.includes('antigravity')) {
+                        customWorkspacePath = GLib.build_filenamev([this._userConfigDir, 'Antigravity/User/workspaceStorage']);
                     }
                     else {
                         customWorkspacePath = GLib.build_filenamev([this._userConfigDir, 'Code/User/workspaceStorage']);
@@ -279,7 +287,7 @@ export class VSCodeWorkspacesCore {
                     this._log(`No predefined editor found for binary '${editorLocation}', creating custom editor entry`);
                     const lowerEditorLocation = editorLocation.toLowerCase();
                     let customWorkspacePath = '';
-                    if (lowerEditorLocation.includes('code') || lowerEditorLocation.includes('codium')) {
+                    if (lowerEditorLocation.includes('code') || lowerEditorLocation.includes('codium') || lowerEditorLocation.includes('antigravity')) {
                         if (lowerEditorLocation.includes('insiders')) {
                             customWorkspacePath = GLib.build_filenamev([this._userConfigDir, 'Code - Insiders/User/workspaceStorage']);
                         }
@@ -288,6 +296,9 @@ export class VSCodeWorkspacesCore {
                         }
                         else if (lowerEditorLocation.includes('cursor')) {
                             customWorkspacePath = GLib.build_filenamev([this._userConfigDir, 'Cursor/User/workspaceStorage']);
+                        }
+                        else if (lowerEditorLocation.includes('antigravity')) {
+                            customWorkspacePath = GLib.build_filenamev([this._userConfigDir, 'Antigravity/User/workspaceStorage']);
                         }
                         else {
                             customWorkspacePath = GLib.build_filenamev([this._userConfigDir, 'Code/User/workspaceStorage']);
