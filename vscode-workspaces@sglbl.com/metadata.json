@@ -1,5 +1,5 @@
 {
-  "description": "A VSCode/Codium Workspace management tool-set for GNOME - This extension is not affiliated, funded, or in any way associated with Microsoft and vscode software.",
+  "description": "A VSCode/Codium Workspace management tool-set for GNOME - This extension is not affiliated, funded, or in any way associated with Microsoft and vscode software. It's a fork of ZanzyTHEbar's project",
   "donations": {
     "github": "sglbl"
   },
