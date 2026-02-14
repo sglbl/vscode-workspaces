@@ -24,6 +24,23 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# If choice is still auto, try to read from extension settings
+if [[ "$EDITOR_CHOICE" == "auto" ]]; then
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    if [[ -d "$SCRIPT_DIR/schemas" ]]; then
+        # Try to read the extension setting for editor-location
+        SAVED_SETTING=$(GSETTINGS_SCHEMA_DIR="$SCRIPT_DIR/schemas" gsettings get org.gnome.shell.extensions.vscode-workspaces editor-location 2>/dev/null || true)
+        
+        # Remove single quotes from the output (e.g., 'code' -> code)
+        SAVED_SETTING="${SAVED_SETTING%\'}"
+        SAVED_SETTING="${SAVED_SETTING#\'}"
+        
+        if [[ -n "$SAVED_SETTING" && "$SAVED_SETTING" != "auto" ]]; then
+            EDITOR_CHOICE="$SAVED_SETTING"
+        fi
+    fi
+fi
+
 # ── Editor Definitions ────────────────────────────────────────────────────────
 # Each entry: name|binary|workspaceStoragePath
 declare -a EDITORS=(
