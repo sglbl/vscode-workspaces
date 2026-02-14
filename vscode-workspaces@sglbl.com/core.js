@@ -57,6 +57,7 @@ export class VSCodeWorkspacesCore {
     ];
     _iconNames = ['code', 'vscode', 'vscodium', 'codium', 'code-insiders', 'cursor', 'antigravity'];
     _menuUpdating = false;
+    _isRefreshing = false;
     _cleanupOrphanedWorkspaces = false;
     _nofailList = [];
     _customCmdArgs = '';
@@ -647,31 +648,54 @@ export class VSCodeWorkspacesCore {
             popupMenu.addMenuItem(showMoreSubMenu);
         }
     }
-    _parseWorkspaceJson(workspaceStoreDir) {
+    _loadContentsAsync(file) {
+        return new Promise((resolve) => {
+            file.load_contents_async(null, (obj, res) => {
+                try {
+                    const [success, contents] = obj.load_contents_finish(res);
+                    resolve(success ? contents : null);
+                } catch (e) {
+                    resolve(null);
+                }
+            });
+        });
+    }
+
+    _queryInfoAsync(file, attributes) {
+        return new Promise((resolve) => {
+            file.query_info_async(attributes, Gio.FileQueryInfoFlags.NONE, GLib.PRIORITY_DEFAULT, null, (obj, res) => {
+                try {
+                    resolve(obj.query_info_finish(res));
+                } catch (e) {
+                    resolve(null);
+                }
+            });
+        });
+    }
+
+    async _parseWorkspaceJson(workspaceStoreDir) {
         try {
-            const workspaceFile = Gio.File.new_for_path(GLib.build_filenamev([workspaceStoreDir.get_path(), 'workspace.json']));
-            if (!workspaceFile.query_exists(null)) {
-                this._log(`No workspace.json found in ${workspaceStoreDir.get_path()}`);
-                return null;
-            }
-            const [, contents] = workspaceFile.load_contents(null);
+            const workspacePath = GLib.build_filenamev([workspaceStoreDir.get_path(), 'workspace.json']);
+            const workspaceFile = Gio.File.new_for_path(workspacePath);
+
+            const contents = await this._loadContentsAsync(workspaceFile);
+            if (!contents) return null;
+
             const decoder = new TextDecoder();
             const json = JSON.parse(decoder.decode(contents));
             const workspaceURI = (json.folder || json.workspace);
             if (!workspaceURI) {
-                this._log('No folder or workspace property found in workspace.json');
                 return null;
             }
             const remote = workspaceURI.startsWith('vscode-remote://') || workspaceURI.startsWith('docker://');
             const nofail = json.nofail === true;
-            // Get modification time of workspace.json to sort by recency
+
             let mtime = 0;
-            try {
-                const fileInfo = workspaceFile.query_info('time::modified', Gio.FileQueryInfoFlags.NONE, null);
+            const fileInfo = await this._queryInfoAsync(workspaceFile, 'time::modified');
+            if (fileInfo) {
                 mtime = fileInfo.get_attribute_uint64('time::modified');
-            } catch (e) {
-                // fallback to 0 if mtime unavailable
             }
+
             this._log(`Parsed workspace.json in ${workspaceStoreDir.get_path()} with ${workspaceURI} (nofail: ${nofail}, remote: ${remote}, mtime: ${mtime})`);
             return { uri: workspaceURI, storeDir: workspaceStoreDir, nofail, remote, mtime };
         }
@@ -711,43 +735,67 @@ export class VSCodeWorkspacesCore {
             }
         }
     }
-    _iterateWorkspaceDir(dir, callback) {
+    _enumerateChildrenAsync(dir, attributes) {
+        return new Promise((resolve) => {
+            dir.enumerate_children_async(attributes, Gio.FileQueryInfoFlags.NONE, GLib.PRIORITY_DEFAULT, null, (obj, res) => {
+                try {
+                    resolve(obj.enumerate_children_finish(res));
+                } catch (e) {
+                    console.error(e, `Failed to enumerate ${dir.get_path()}`);
+                    resolve(null);
+                }
+            });
+        });
+    }
+
+    _nextFilesAsync(enumerator, num) {
+        return new Promise((resolve) => {
+            enumerator.next_files_async(num, GLib.PRIORITY_DEFAULT, null, (obj, res) => {
+                try {
+                    resolve(obj.next_files_finish(res));
+                } catch (e) {
+                    resolve([]);
+                }
+            });
+        });
+    }
+
+    async _iterateWorkspaceDir(dir, callback) {
         let enumerator = null;
         try {
-            enumerator = dir.enumerate_children('standard::*,unix::uid', Gio.FileQueryInfoFlags.NONE, null);
-            let info;
-            while ((info = enumerator.next_file(null)) !== null) {
-                const workspaceStoreDir = enumerator.get_child(info);
-                this._log(`Checking ${workspaceStoreDir.get_path()}`);
-                const workspace = this._parseWorkspaceJson(workspaceStoreDir);
-                if (!workspace)
-                    continue;
-                this._maybeUpdateWorkspaceNoFail(workspace);
-                const pathToWorkspace = Gio.File.new_for_uri(workspace.uri);
-                if (!pathToWorkspace.query_exists(null)) {
-                    this._log(`Workspace not found: ${pathToWorkspace.get_path()}`);
-                    if (this._cleanupOrphanedWorkspaces && !workspace.nofail) {
-                        this._log(`Workspace will be removed: ${pathToWorkspace.get_path()}`);
-                        this._workspaces.delete(workspace);
-                        const trashRes = workspace.storeDir?.trash(null);
-                        if (!trashRes) {
-                            this._log(`Failed to move workspace to trash: ${workspace.uri}`);
+            enumerator = await this._enumerateChildrenAsync(dir, 'standard::*,unix::uid');
+            if (!enumerator) return;
+
+            while (true) {
+                const files = await this._nextFilesAsync(enumerator, 20);
+                if (!files || files.length === 0) break;
+
+                for (const info of files) {
+                    const workspaceStoreDir = enumerator.get_child(info);
+                    const workspace = await this._parseWorkspaceJson(workspaceStoreDir);
+                    if (!workspace) continue;
+
+                    this._maybeUpdateWorkspaceNoFail(workspace);
+                    const pathToWorkspace = Gio.File.new_for_uri(workspace.uri);
+
+                    // Note: We use query_exists (sync) on target path. 
+                    // To be fully non-blocking this should be async too, but it's less frequent.
+                    // Prioritize optimization of the loop over thousands of storage folders.
+                    if (!pathToWorkspace.query_exists(null)) {
+                        this._log(`Workspace not found: ${pathToWorkspace.get_path()}`);
+                        if (this._cleanupOrphanedWorkspaces && !workspace.nofail) {
+                            this._log(`Workspace will be removed: ${pathToWorkspace.get_path()}`);
+                            this._workspaces.delete(workspace);
+                            try { workspace.storeDir?.trash(null); } catch (e) { }
                         }
-                        else {
-                            this._log(`Workspace trashed: ${workspace.uri}`);
-                        }
+                        continue;
                     }
-                    else {
-                        this._log(`Skipping removal for workspace: ${workspace.uri} (cleanup enabled: ${this._cleanupOrphanedWorkspaces}, nofail: ${workspace.nofail})`);
+                    if ([...this._workspaces].some(ws => ws.uri === workspace.uri)) {
+                        continue;
                     }
-                    continue;
+                    this._workspaces.add(workspace);
+                    if (callback) callback(workspace);
                 }
-                if ([...this._workspaces].some(ws => ws.uri === workspace.uri)) {
-                    this._log(`Workspace already exists: ${workspace.uri}`);
-                    continue;
-                }
-                this._workspaces.add(workspace);
-                callback(workspace);
             }
         }
         catch (error) {
@@ -755,9 +803,7 @@ export class VSCodeWorkspacesCore {
         }
         finally {
             if (enumerator) {
-                if (!enumerator.close(null)) {
-                    this._log('Failed to close enumerator');
-                }
+                enumerator.close(null);
             }
         }
     }
@@ -1122,26 +1168,39 @@ export class VSCodeWorkspacesCore {
             }
         }
     }
-    _refresh(forceFullRefresh = false) {
-        this._log(`Refreshing workspaces (full refresh: ${forceFullRefresh})`);
-        this._persistSettings();
+    async _refresh(forceFullRefresh = false) {
         if (forceFullRefresh) {
+            this._log('Performing full refresh (re-initializing editors)');
+            this._persistSettings();
             this._initializeWorkspaces();
-        }
-        else {
-            this._lightweightRefresh();
-        }
-        // Note: _createMenu() is NOT called here because both
-        // _initializeWorkspaces() and _lightweightRefresh() -> _getRecentWorkspaces()
-        // -> _finalizeWorkspaceProcessing() already call _createMenu().
-    }
-    _lightweightRefresh() {
-        if (!this._activeEditor) {
-            this._log('No active editor found for lightweight refresh');
             return;
         }
-        this._log(`Performing lightweight refresh for ${this._activeEditor.name}`);
-        this._getRecentWorkspaces();
+
+        if (this._isRefreshing) {
+            this._log('Refresh already in progress, skipping');
+            return;
+        }
+
+        this._isRefreshing = true;
+        try {
+            if (!this._activeEditor) {
+                this._log('No active editor found for refresh');
+                return;
+            }
+
+            this._log(`Performing async scan for ${this._activeEditor.name}`);
+            const dir = Gio.File.new_for_path(this._activeEditor.workspacePath);
+
+            await this._iterateWorkspaceDir(dir, workspace => {
+                this._processWorkspace(workspace);
+            });
+
+            this._finalizeWorkspaceProcessing();
+        } catch (e) {
+            console.error(e, 'Error during async refresh');
+        } finally {
+            this._isRefreshing = false;
+        }
     }
     _log(message) {
         if (!this._debug) {
