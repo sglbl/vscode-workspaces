@@ -100,15 +100,27 @@ resolve_editor() {
 resolve_editor "$EDITOR_CHOICE"
 
 # ── Collect Recent Workspaces ─────────────────────────────────────────────────
-# Output: mtime|folder_uri for each workspace, sorted newest first
+
+# Try to read favorites from extension settings
+FAVORITES=""
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -d "$SCRIPT_DIR/schemas" ]]; then
+    # gsettings get returns something like "['uri1', 'uri2']"
+    FAV_RAW=$(GSETTINGS_SCHEMA_DIR="$SCRIPT_DIR/schemas" gsettings get org.gnome.shell.extensions.vscode-workspaces favorite-workspaces 2>/dev/null || echo "[]")
+    # Convert to simple space-separated list for easy grepping
+    FAVORITES=$(echo "$FAV_RAW" | tr -d "[]'," )
+fi
+
+# Output: is_favorite|mtime|uri|folder_path
 collect_workspaces() {
     local ws_dir="$1"
 
-    for ws_hash_dir in "$ws_dir"/*/; do
-        local ws_json="$ws_hash_dir/workspace.json"
+    # Optimization: processing thousands of JSONs is slow.
+    # Logic matched with core.js: sort directories by activity first.
+    while read -r ts dir_path; do
+        local ws_json="$dir_path/workspace.json"
         [[ -f "$ws_json" ]] || continue
 
-        # Extract folder or workspace URI (handles both keys)
         local uri
         uri=$(python3 -c "
 import json, sys
@@ -120,14 +132,8 @@ except:
 " 2>/dev/null)
 
         [[ -z "$uri" ]] && continue
-        # Skip remote workspaces (vscode-remote://, docker://)
         [[ "$uri" == vscode-remote://* || "$uri" == docker://* ]] && continue
 
-        # Get modification time of workspace.json (epoch seconds)
-        local mtime
-        mtime=$(stat -c '%Y' "$ws_json" 2>/dev/null || echo 0)
-
-        # Decode the file:// URI to a local path and check it exists
         local decoded_path
         decoded_path=$(python3 -c "
 import urllib.parse, sys
@@ -138,15 +144,25 @@ else:
     print(uri)
 " 2>/dev/null)
 
-        # Only include workspaces whose directories/files still exist
         if [[ -n "$decoded_path" && -e "$decoded_path" ]]; then
-            echo "${mtime}|${uri}|${decoded_path}"
+            local is_fav=0
+            # Check if this URI is in our favorites list
+            if [[ " $FAVORITES " == *" $uri "* ]]; then
+                is_fav=1
+            fi
+            
+            # Key: is_fav | mtime (without decimal)
+            echo "${is_fav}|${ts%%.*}|${uri}|${decoded_path}"
         fi
-    done
+    done < <(find "$ws_dir" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -n 50)
 }
 
-# Collect, sort by mtime descending, deduplicate by URI, take top N
-WORKSPACES=$(collect_workspaces "$WORKSPACE_DIR" | sort -t'|' -k1 -rn | awk -F'|' '!seen[$2]++' | head -n "$MAX_ITEMS")
+# Collect and sort: 
+# 1. Sort by is_fav (field 1) DESC
+# 2. Sort by mtime (field 2) DESC
+# 3. Deduplicate by URI (field 3)
+# 4. Take top N
+WORKSPACES=$(collect_workspaces "$WORKSPACE_DIR" | sort -t'|' -k1,1rn -k2,2rn | awk -F'|' '!seen[$3]++' | head -n "$MAX_ITEMS")
 
 if [[ -z "$WORKSPACES" ]]; then
     echo "No recent workspaces found. Desktop file not updated."
@@ -166,19 +182,18 @@ fi
 # Extract just the [Desktop Entry] section (before any [Desktop Action ...])
 HEADER=$(echo "$BASE_DESKTOP" | awk '/^\[Desktop Action/{exit} {print}')
 
-# Build action IDs and action sections
+# (Adjusting the read loop to handle the extra field: is_fav|mtime|uri|path)
+INDEX=0
 ACTION_IDS=()
 ACTION_SECTIONS=""
-INDEX=0
 
-while IFS='|' read -r mtime uri decoded_path; do
+while IFS='|' read -r is_fav mtime uri decoded_path; do
     # Get a display name (basename of the path)
     local_name=$(basename "$decoded_path")
-
     # Strip .code-workspace extension for display
     local_name="${local_name%.code-workspace}"
 
-    # Make a clean action ID (alphanumeric + hyphens only)
+    # Make a clean action ID
     action_id="workspace-${INDEX}"
     ACTION_IDS+=("$action_id")
 
@@ -224,3 +239,6 @@ echo "  Workspaces:"
 while IFS='|' read -r mtime uri decoded_path; do
     echo "    • $(basename "$decoded_path")"
 done <<< "$WORKSPACES"
+
+# Force GNOME Shell / Desktop Entry system to refresh the cache
+update-desktop-database "$(dirname "$DESKTOP_TARGET")" >/dev/null 2>&1 || true
